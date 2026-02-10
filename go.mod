@@ -4,7 +4,7 @@ go 1.25.6
 
 require (
 	github.com/GoAsyncFunc/uniproxy v0.0.6
-	github.com/sagernet/sing-box v1.12.17
+	github.com/sagernet/sing-box v1.12.21
 	github.com/sirupsen/logrus v1.9.4
 	github.com/urfave/cli/v2 v2.27.7
 )
@@ -38,7 +38,7 @@ require (
 	github.com/sagernet/netlink v0.0.0-20240612041022-b9a21c07ac6a // indirect
 	github.com/sagernet/nftables v0.3.0-beta.4 // indirect
 	github.com/sagernet/sing-mux v0.3.4 // indirect
-	github.com/sagernet/sing-tun v0.7.3 // indirect
+	github.com/sagernet/sing-tun v0.7.11 // indirect
 	github.com/sagernet/sing-vmess v0.2.7 // indirect
 	github.com/sagernet/smux v1.5.50-sing-box-mod.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
@@ -60,7 +60,7 @@ require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
 	github.com/go-resty/resty/v2 v2.17.1 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
-	github.com/sagernet/sing v0.7.14
+	github.com/sagernet/sing v0.7.18
 	github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 // indirect
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sys v0.39.0 // indirect
