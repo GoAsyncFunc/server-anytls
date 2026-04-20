@@ -3,7 +3,7 @@ module github.com/GoAsyncFunc/server-anytls
 go 1.25.6
 
 require (
-	github.com/GoAsyncFunc/uniproxy v0.0.6
+	github.com/GoAsyncFunc/uniproxy v0.0.8
 	github.com/sagernet/sing-box v1.12.17
 	github.com/sirupsen/logrus v1.9.4
 	github.com/urfave/cli/v2 v2.27.7
