@@ -1,3 +1,6 @@
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -s -w -X main.Version=$(VERSION)
+
 fmt:
 	@gofumpt -l -w .
 	@gofmt -s -w .
@@ -17,4 +20,13 @@ lint_install:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
 test:
-	go test ./...
+	go test -race -coverprofile=coverage.out ./...
+
+build:
+	@mkdir -p build
+	go build -v -trimpath -ldflags "$(LDFLAGS)" -o build/anytls-node ./cmd/server
+
+clean:
+	rm -rf build coverage.out
+
+.PHONY: fmt fmt_install lint lint_install test build clean

@@ -1,0 +1,26 @@
+.git
+.github
+.gitignore
+.dockerignore
+
+# Build artifacts
+build/anytls-node*
+build/*.tar.gz
+*.exe
+*.test
+*.out
+
+# Local secrets / certs
+*.pem
+*.key
+*.crt
+
+# Docs (we ship none into the image)
+docs
+ANALYSIS.zh-CN.md
+
+# Editor / OS
+.idea
+.vscode
+*.swp
+.DS_Store

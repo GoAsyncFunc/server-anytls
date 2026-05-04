@@ -14,14 +14,15 @@ import (
 	"github.com/GoAsyncFunc/server-anytls/internal/app/server"
 	"github.com/GoAsyncFunc/server-anytls/internal/pkg/service"
 	api "github.com/GoAsyncFunc/uniproxy/pkg"
-	_ "github.com/sagernet/sing-box"
 )
 
 const (
 	Name      = "anytls-node"
-	Version   = "0.0.1"
 	CopyRight = "GoAsyncFunc@2025"
 )
+
+// Version is injected at build time via -ldflags "-X main.Version=...".
+var Version = "dev"
 
 func main() {
 	cli.VersionPrinter = func(c *cli.Context) {
@@ -32,9 +33,23 @@ func main() {
 	var apiConfig api.Config
 	var serviceConfig service.Config
 	var certConfig service.CertConfig
-	var extConfPath string
-	var dataDir string
 
+	app := BuildApp(&config, &apiConfig, &serviceConfig, &certConfig)
+
+	if err := app.Run(os.Args); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// BuildApp constructs the urfave/cli App with all flags wired to the supplied
+// destinations. Exposed for tests so that flag parsing can be verified without
+// invoking main().
+func BuildApp(
+	config *server.Config,
+	apiConfig *api.Config,
+	serviceConfig *service.Config,
+	certConfig *service.CertConfig,
+) *cli.App {
 	app := &cli.App{
 		Name:      Name,
 		Version:   Version,
@@ -56,18 +71,10 @@ func main() {
 				Destination: &apiConfig.Key,
 			},
 			&cli.StringFlag{
-				Name:        "ext_conf_file",
-				Usage:       "Extended profiles (ignored)",
-				EnvVars:     []string{"EXT_CONF_FILE"},
-				Required:    false,
-				Destination: &extConfPath,
-			},
-			&cli.StringFlag{
 				Name:        "cert_file",
 				Usage:       "Cert file",
 				EnvVars:     []string{"CERT_FILE"},
 				Value:       "/root/.cert/server.crt",
-				Required:    false,
 				DefaultText: "/root/.cert/server.crt",
 				Destination: &certConfig.CertFile,
 			},
@@ -76,7 +83,6 @@ func main() {
 				Usage:       "Key file",
 				EnvVars:     []string{"KEY_FILE"},
 				Value:       "/root/.cert/server.key",
-				Required:    false,
 				DefaultText: "/root/.cert/server.key",
 				Destination: &certConfig.KeyFile,
 			},
@@ -88,30 +94,30 @@ func main() {
 				Destination: &apiConfig.NodeID,
 			},
 			&cli.DurationFlag{
-				Name:        "fetch_users_interval, fui",
+				Name:        "fetch_users_interval",
+				Aliases:     []string{"fui"},
 				Usage:       "API request cycle(fetch users), unit: second",
 				EnvVars:     []string{"FETCH_USER_INTERVAL"},
 				Value:       time.Second * 60,
 				DefaultText: "60",
-				Required:    false,
 				Destination: &serviceConfig.FetchUsersInterval,
 			},
 			&cli.DurationFlag{
-				Name:        "report_traffics_interval, fui",
+				Name:        "report_traffics_interval",
+				Aliases:     []string{"rti"},
 				Usage:       "API request cycle(report traffics), unit: second",
 				EnvVars:     []string{"REPORT_TRAFFICS_INTERVAL"},
 				Value:       time.Second * 80,
 				DefaultText: "80",
-				Required:    false,
 				Destination: &serviceConfig.ReportTrafficsInterval,
 			},
 			&cli.DurationFlag{
-				Name:        "heartbeat_interval, hbi",
+				Name:        "heartbeat_interval",
+				Aliases:     []string{"hbi"},
 				Usage:       "API request cycle(heartbeat), unit: second",
 				EnvVars:     []string{"HEARTBEAT_INTERVAL"},
 				Value:       time.Minute * 3,
 				DefaultText: "180",
-				Required:    false,
 				Destination: &serviceConfig.HeartbeatInterval,
 			},
 			&cli.StringFlag{
@@ -120,25 +126,13 @@ func main() {
 				Usage:       "Log mode",
 				EnvVars:     []string{"LOG_LEVEL"},
 				Destination: &config.LogLevel,
-				Required:    false,
-			},
-			&cli.StringFlag{
-				Name:        "data_dir",
-				Usage:       "Data directory",
-				EnvVars:     []string{"DATA_DIR"},
-				Value:       "/var/lib/anytls-node",
-				DefaultText: "/var/lib/anytls-node",
-				Required:    false,
-				Destination: &dataDir,
 			},
 		},
 		Before: func(c *cli.Context) error {
 			log.SetFormatter(&log.TextFormatter{})
 			switch config.LogLevel {
 			case server.LogLevelDebug:
-				log.SetFormatter(&log.TextFormatter{
-					FullTimestamp: true,
-				})
+				log.SetFormatter(&log.TextFormatter{FullTimestamp: true})
 				log.SetLevel(log.DebugLevel)
 				log.SetReportCaller(true)
 			case server.LogLevelInfo:
@@ -151,12 +145,11 @@ func main() {
 			return nil
 		},
 		Action: func(c *cli.Context) error {
-			serviceConfig.Cert = &certConfig
-			var extFileBytes []byte
+			serviceConfig.Cert = certConfig
 
 			apiConfig.NodeType = api.AnyTls
 
-			serv, err := server.New(&config, &apiConfig, &serviceConfig, extFileBytes, dataDir)
+			serv, err := server.New(config, apiConfig, serviceConfig)
 			if err != nil {
 				return fmt.Errorf("failed to create server: %w", err)
 			}
@@ -178,12 +171,9 @@ func main() {
 				}
 			}()
 
-			runtime.GC()
-			{
-				osSignals := make(chan os.Signal, 1)
-				signal.Notify(osSignals, os.Interrupt, syscall.SIGTERM)
-				<-osSignals
-			}
+			osSignals := make(chan os.Signal, 1)
+			signal.Notify(osSignals, os.Interrupt, syscall.SIGTERM)
+			<-osSignals
 			return nil
 		},
 	}
@@ -200,8 +190,5 @@ func main() {
 		},
 	}
 
-	err := app.Run(os.Args)
-	if err != nil {
-		log.Fatal(err)
-	}
+	return app
 }

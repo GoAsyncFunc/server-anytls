@@ -22,17 +22,24 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version: '1.25.6'
           check-latest: true
 
-      # Linter skipped for Go 1.25 (beta support)
+      - name: Download dependencies
+        run: go mod download
+
+      - name: go vet
+        run: go vet ./...
+
+      # golangci-lint disabled until a release built with go >= 1.25 is
+      # published. v1.64.8 ships compiled with go 1.24 and refuses to load
+      # config when the project targets a newer Go version. Track upstream
+      # https://github.com/golangci/golangci-lint/releases for a v2 line
+      # cut against go 1.25.
       # - name: golangci-lint
       #   uses: golangci/golangci-lint-action@v6
       #   with:
       #     version: latest
-
-      - name: Download dependencies
-        run: go mod download
 
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...

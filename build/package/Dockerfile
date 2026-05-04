@@ -1,15 +1,18 @@
 # Build go
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25.6-alpine AS builder
 
 WORKDIR /app
 COPY . .
 
 ARG TARGETOS
 ARG TARGETARCH
+ARG VERSION=dev
 
 ENV CGO_ENABLED=0
 RUN go mod download
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -v -o anytls-node -trimpath -ldflags "-s -w" ./cmd/server
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -v -trimpath \
+    -ldflags "-s -w -X main.Version=${VERSION}" \
+    -o anytls-node ./cmd/server
 
 # Release
 FROM alpine

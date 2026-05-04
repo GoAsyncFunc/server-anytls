@@ -5,6 +5,10 @@
 *.so
 *.dylib
 
+# Build artifacts
+/build/
+coverage.out
+
 # Logs
 *.log
 
@@ -17,3 +21,7 @@
 # Certificates (Local Development)
 server.crt
 server.key
+
+# Local-only docs (analyses, planning notes)
+/ANALYSIS*.md
+/docs/

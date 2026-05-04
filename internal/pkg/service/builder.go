@@ -14,12 +14,10 @@ import (
 
 type Config struct {
 	NodeID                 int
-	NodeType               string
 	FetchUsersInterval     time.Duration
 	ReportTrafficsInterval time.Duration
 	HeartbeatInterval      time.Duration
 	Cert                   *CertConfig
-	ListenAddr             string
 }
 
 type CertConfig struct {

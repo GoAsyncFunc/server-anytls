@@ -16,10 +16,9 @@ type Config struct {
 }
 
 const (
-	LogLevelDebug  = "debug"
-	LogLevelInfo   = "info"
-	LogLevelError  = "error"
-	DefaultDataDir = "/var/lib/anytls-node"
+	LogLevelDebug = "debug"
+	LogLevelInfo  = "info"
+	LogLevelError = "error"
 )
 
 type Server struct {
@@ -27,39 +26,25 @@ type Server struct {
 	serviceConfig *service.Config
 	apiClient     *api.Client
 	config        *Config
-	extConfBytes  []byte
 	service       *service.Builder
 	mu            sync.Mutex
-	dataDir       string
 	ctx           context.Context
 	cancel        context.CancelFunc
 }
 
-func New(config *Config, apiConfig *api.Config, serviceConfig *service.Config, extConfBytes []byte, dataDir string) (*Server, error) {
-	// API Client initialization
+func New(config *Config, apiConfig *api.Config, serviceConfig *service.Config) (*Server, error) {
 	client := api.New(apiConfig)
-	if dataDir == "" {
-		dataDir = DefaultDataDir
-	}
 	return &Server{
 		config:        config,
 		logLevel:      config.LogLevel,
 		apiClient:     client,
 		serviceConfig: serviceConfig,
-		extConfBytes:  extConfBytes,
-		dataDir:       dataDir,
 	}, nil
 }
 
 func (s *Server) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Configure logrus level
-	if lvl, err := log.ParseLevel(s.config.LogLevel); err == nil {
-		log.SetLevel(lvl)
-	} else {
-		log.SetLevel(log.InfoLevel)
-	}
 
 	log.Infoln("server start")
 
