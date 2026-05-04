@@ -1,42 +1,68 @@
+// builder.go drives the AnyTLS node lifecycle: it owns the sing-anytls
+// service, the TLS listener, the four periodic control-plane tasks, and
+// the runtime user / traffic / online tables. The transport layer pieces
+// live in inboundbuilder.go and handler.go.
 package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
-	"net"
-
 	api "github.com/GoAsyncFunc/uniproxy/pkg"
+	anytls "github.com/anytls/sing-anytls"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/GoAsyncFunc/server-anytls/internal/pkg/devlimit"
+	"github.com/GoAsyncFunc/server-anytls/internal/pkg/limiter"
+	"github.com/GoAsyncFunc/server-anytls/internal/pkg/router"
 )
 
+const defaultInboundTag = "anytls-in"
+
+// Config carries CLI-derived runtime settings into the Builder.
 type Config struct {
 	NodeID                 int
 	FetchUsersInterval     time.Duration
 	ReportTrafficsInterval time.Duration
 	HeartbeatInterval      time.Duration
+	CheckNodeInterval      time.Duration
 	Cert                   *CertConfig
+	AllowPrivateOutbound   bool
 }
 
+// CertConfig holds paths to the TLS material loaded for inbound listeners.
 type CertConfig struct {
 	CertFile string
 	KeyFile  string
 }
 
+// Builder runs the data plane and the panel control plane for one node.
 type Builder struct {
 	config    *Config
 	nodeInfo  *api.NodeInfo
 	apiClient *api.Client
 
-	// Traffic Stats
+	inboundTag string
+
+	mu       sync.Mutex
+	listener net.Listener
+	tlsCert  []byte // raw cert bytes for change detection
+	tlsKey   []byte
+	service  *anytls.Service
+
 	trafficStats *TrafficStats
+	online       *OnlineTracker
+	router       *router.Router
 
-	// Users
 	userList []api.UserInfo
-
-	mu sync.Mutex
 
 	fetchUsersMonitorPeriodic      *Periodic
 	reportTrafficsMonitorPeriodic  *Periodic
@@ -45,42 +71,9 @@ type Builder struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
-
-	listener net.Listener
 }
 
-// Simple Periodic task wrapper
-type Periodic struct {
-	Interval time.Duration
-	Execute  func() error
-	stop     chan struct{}
-}
-
-func (p *Periodic) Start() error {
-	p.stop = make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(p.Interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if err := p.Execute(); err != nil {
-					log.Errorf("Periodic task error: %v", err)
-				}
-			case <-p.stop:
-				return
-			}
-		}
-	}()
-	return nil
-}
-
-func (p *Periodic) Close() {
-	if p.stop != nil {
-		close(p.stop)
-	}
-}
-
+// New constructs a Builder. The returned instance is inert until Start.
 func New(ctx context.Context, config *Config, nodeInfo *api.NodeInfo, apiClient *api.Client) *Builder {
 	ctx, cancel := context.WithCancel(ctx)
 	return &Builder{
@@ -89,22 +82,24 @@ func New(ctx context.Context, config *Config, nodeInfo *api.NodeInfo, apiClient 
 		apiClient:    apiClient,
 		ctx:          ctx,
 		cancel:       cancel,
+		inboundTag:   defaultInboundTag,
 		trafficStats: NewTrafficStats(),
+		online:       NewOnlineTracker(),
 	}
 }
 
+// Start opens the inbound listener, fetches the initial user list, and
+// schedules the four periodic control-plane tasks.
 func (b *Builder) Start() error {
-	if err := b.startAnyTls(); err != nil {
+	if err := b.startInbound(); err != nil {
 		return err
 	}
 
-	// Initial user fetch
 	userList, err := b.apiClient.GetUserList(b.ctx)
 	if err != nil {
 		return err
 	}
-	b.updateUsers(userList)
-	b.userList = userList
+	b.applyUsers(userList)
 
 	b.fetchUsersMonitorPeriodic = &Periodic{
 		Interval: b.config.FetchUsersInterval,
@@ -115,24 +110,25 @@ func (b *Builder) Start() error {
 		Execute:  b.reportTrafficsMonitor,
 	}
 
-	log.Infoln("Start monitoring for user acquisition")
-	if err := b.fetchUsersMonitorPeriodic.Start(); err != nil {
-		return err
+	checkInterval := b.config.CheckNodeInterval
+	if checkInterval <= 0 {
+		checkInterval = b.config.FetchUsersInterval
 	}
-
-	log.Infoln("Start traffic reporting monitoring")
-	if err := b.reportTrafficsMonitorPeriodic.Start(); err != nil {
-		return err
-	}
-
-	// Use same interval as fetch users for node config check, or 60s default
-	checkInterval := b.config.FetchUsersInterval
-	if checkInterval == 0 {
+	if checkInterval <= 0 {
 		checkInterval = time.Minute
 	}
 	b.checkNodeConfigMonitorPeriodic = &Periodic{
 		Interval: checkInterval,
 		Execute:  b.checkNodeConfigMonitor,
+	}
+
+	log.Infoln("Start monitoring for user acquisition")
+	if err := b.fetchUsersMonitorPeriodic.Start(); err != nil {
+		return err
+	}
+	log.Infoln("Start traffic reporting monitoring")
+	if err := b.reportTrafficsMonitorPeriodic.Start(); err != nil {
+		return err
 	}
 	log.Infoln("Start node config monitoring")
 	if err := b.checkNodeConfigMonitorPeriodic.Start(); err != nil {
@@ -149,96 +145,69 @@ func (b *Builder) Start() error {
 			return err
 		}
 	}
-
 	return nil
 }
 
-func (b *Builder) startAnyTls() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.startAnyTlsInternal()
-}
-
-func (b *Builder) startAnyTlsInternal() error {
-	if b.listener != nil {
-		b.listener.Close()
-		b.listener = nil
-	}
-
-	anyTlsInfo := b.nodeInfo.AnyTls
-	if anyTlsInfo == nil {
-		return fmt.Errorf("node info missing AnyTLS config")
-	}
-
-	listenAddr := fmt.Sprintf(":%d", anyTlsInfo.ServerPort)
-	log.Infof("Starting AnyTLS server on %s", listenAddr)
-
-	ln, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		return fmt.Errorf("failed to listen TCP: %w", err)
-	}
-	b.listener = ln
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				if b.ctx.Err() != nil {
-					return
-				}
-				log.Debugf("Accept stopping: %v", err)
-				return
-			}
-			go b.handleConnection(conn)
-		}
-	}()
-
-	return nil
-}
-
-func (b *Builder) handleConnection(conn net.Conn) {
-	defer conn.Close()
-	// TODO: Implement AnyTLS specific handshake or forwarding logic here.
-	// Currently just a TCP listener.
-	// We can add ShadowTLS handshake logic if the library becomes available.
-
-	// Example: Log connection
-	// log.Debugf("New connection from %s", conn.RemoteAddr())
-}
-
+// Close stops every periodic, closes the listener, and cancels the
+// context. Idempotent.
 func (b *Builder) Close() error {
 	b.cancel()
-	if b.fetchUsersMonitorPeriodic != nil {
-		b.fetchUsersMonitorPeriodic.Close()
-	}
-	if b.reportTrafficsMonitorPeriodic != nil {
-		b.reportTrafficsMonitorPeriodic.Close()
-	}
-	if b.checkNodeConfigMonitorPeriodic != nil {
-		b.checkNodeConfigMonitorPeriodic.Close()
-	}
-	if b.heartbeatMonitorPeriodic != nil {
-		b.heartbeatMonitorPeriodic.Close()
+	for _, p := range []*Periodic{
+		b.fetchUsersMonitorPeriodic,
+		b.reportTrafficsMonitorPeriodic,
+		b.checkNodeConfigMonitorPeriodic,
+		b.heartbeatMonitorPeriodic,
+	} {
+		if p != nil {
+			p.Close()
+		}
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.listener != nil {
-		b.listener.Close()
+		_ = b.listener.Close()
 		b.listener = nil
 	}
 	return nil
+}
+
+// applyUsers refreshes the in-memory user table, the sing-anytls service
+// password set, and the per-user limiter / device-limit quotas.
+func (b *Builder) applyUsers(users []api.UserInfo) {
+	b.mu.Lock()
+	prev := b.userList
+	b.userList = append([]api.UserInfo(nil), users...)
+	svc := b.service
+	b.mu.Unlock()
+
+	anytlsUsers := BuildUsers(b.inboundTag, users)
+	if svc != nil {
+		svc.UpdateUsers(anytlsUsers)
+	}
+
+	seen := make(map[int]struct{}, len(users))
+	for _, u := range users {
+		seen[u.Id] = struct{}{}
+		limiter.Set(u.Id, u.SpeedLimit)
+		devlimit.SetQuota(u.Id, u.DeviceLimit)
+	}
+	for _, u := range prev {
+		if _, ok := seen[u.Id]; !ok {
+			limiter.Remove(u.Id)
+			devlimit.RemoveUser(u.Id)
+		}
+	}
+
+	log.Debugf("Applied %d users", len(users))
 }
 
 func (b *Builder) fetchUsersMonitor() error {
-	newUserList, err := b.apiClient.GetUserList(b.ctx)
+	users, err := b.apiClient.GetUserList(b.ctx)
 	if err != nil {
 		log.Errorln(err)
 		return nil
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.updateUsers(newUserList)
-	b.userList = newUserList
+	b.applyUsers(users)
 	return nil
 }
 
@@ -247,37 +216,33 @@ func (b *Builder) reportTrafficsMonitor() error {
 	if len(stats) == 0 {
 		return nil
 	}
-
-	userTraffic := make([]api.UserTraffic, 0, len(stats))
-	for uidStr, s := range stats {
-		var uid int
-		fmt.Sscanf(uidStr, "%d", &uid)
-		if uid > 0 && (s.Tx > 0 || s.Rx > 0) {
-			userTraffic = append(userTraffic, api.UserTraffic{
-				UID:      uid,
-				Upload:   int64(s.Tx),
-				Download: int64(s.Rx),
-			})
+	report := make([]api.UserTraffic, 0, len(stats))
+	for uid, s := range stats {
+		if uid <= 0 || (s.Tx == 0 && s.Rx == 0) {
+			continue
 		}
+		report = append(report, api.UserTraffic{
+			UID:      uid,
+			Upload:   int64(s.Tx),
+			Download: int64(s.Rx),
+		})
 	}
-
-	if len(userTraffic) > 0 {
-		log.Infof("%d user traffic needs to be reported", len(userTraffic))
-		err := b.apiClient.ReportUserTraffic(b.ctx, userTraffic)
-		if err != nil {
+	if len(report) > 0 {
+		log.Infof("%d user traffic needs to be reported", len(report))
+		if err := b.apiClient.ReportUserTraffic(b.ctx, report); err != nil {
 			log.Errorln("server error when submitting traffic", err)
-			return nil
 		}
 	}
 	return nil
 }
 
-func (b *Builder) updateUsers(users []api.UserInfo) {
-	// Update users in service
-	log.Debugf("Updated %d users", len(users))
+func (b *Builder) heartbeatMonitor() error {
+	data := b.online.Snapshot()
+	if err := b.apiClient.ReportNodeOnlineUsers(b.ctx, data); err != nil {
+		log.Errorln("server error when sending heartbeat", err)
+	}
+	return nil
 }
-
-// TrafficStats
 
 func (b *Builder) checkNodeConfigMonitor() error {
 	newNodeInfo, err := b.apiClient.GetNodeInfo(b.ctx)
@@ -288,68 +253,116 @@ func (b *Builder) checkNodeConfigMonitor() error {
 	if newNodeInfo == nil || newNodeInfo.AnyTls == nil {
 		return nil
 	}
+	if !b.nodeChanged(newNodeInfo) {
+		return nil
+	}
 
+	log.Infoln("Node configuration changed, reloading inbound...")
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.nodeInfo = newNodeInfo
+	b.mu.Unlock()
 
-	// Check for changes
-	if b.nodeInfo != nil && b.nodeInfo.AnyTls != nil {
-		if b.nodeInfo.AnyTls.ServerPort == newNodeInfo.AnyTls.ServerPort {
-			// Add more checks if AnyTls has more fields
-			return nil // No change
+	if err := b.startInbound(); err != nil {
+		log.Errorf("Failed to restart inbound: %v", err)
+	}
+	return nil
+}
+
+// nodeChanged returns true when any AnyTLS-relevant field, the routes
+// hash, or the on-disk cert content has changed since the last successful
+// start.
+func (b *Builder) nodeChanged(next *api.NodeInfo) bool {
+	b.mu.Lock()
+	cur := b.nodeInfo
+	curCert, curKey := b.tlsCert, b.tlsKey
+	b.mu.Unlock()
+	if cur == nil || cur.AnyTls == nil {
+		return true
+	}
+	if cur.AnyTls.ServerPort != next.AnyTls.ServerPort {
+		return true
+	}
+	if cur.AnyTls.ServerName != next.AnyTls.ServerName {
+		return true
+	}
+	if !equalStringSlice(cur.AnyTls.PaddingScheme, next.AnyTls.PaddingScheme) {
+		return true
+	}
+	if routesHash(cur.Routes) != routesHash(next.Routes) {
+		return true
+	}
+	if b.config.Cert != nil {
+		newCert, newKey := readCertFiles(b.config.Cert.CertFile, b.config.Cert.KeyFile)
+		if !bytesEqual(curCert, newCert) || !bytesEqual(curKey, newKey) {
+			return true
 		}
 	}
+	return false
+}
 
-	log.Infoln("Node configuration changed, reloading AnyTLS server...")
-	b.nodeInfo = newNodeInfo
-
-	if err := b.startAnyTlsInternal(); err != nil {
-		log.Errorf("Failed to restart AnyTLS server: %v", err)
+func equalStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
 	}
-
-	return nil
-}
-
-func (b *Builder) heartbeatMonitor() error {
-	data := make(map[int][]string)
-	err := b.apiClient.ReportNodeOnlineUsers(b.ctx, data)
-	if err != nil {
-		log.Errorln("server error when sending heartbeat", err)
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
 	}
-	return nil
-}
-
-type TrafficStats struct {
-	stats map[string]*ConnStats // auth_id (uid as string) -> stats
-	mu    sync.Mutex
-}
-
-type ConnStats struct {
-	Tx uint64
-	Rx uint64
-}
-
-func NewTrafficStats() *TrafficStats {
-	return &TrafficStats{
-		stats: make(map[string]*ConnStats),
-	}
-}
-
-func (s *TrafficStats) LogTraffic(id string, tx, rx uint64) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.stats[id]; !ok {
-		s.stats[id] = &ConnStats{}
-	}
-	s.stats[id].Tx += tx
-	s.stats[id].Rx += rx
 	return true
 }
 
-func (s *TrafficStats) GetAndReset() map[string]*ConnStats {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r := s.stats
-	s.stats = make(map[string]*ConnStats)
-	return r
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func routesHash(routes []api.Route) string {
+	if len(routes) == 0 {
+		return ""
+	}
+	buf, err := json.Marshal(routes)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(buf)
+	return hex.EncodeToString(sum[:])
+}
+
+// readCertFiles reads cert and key from disk; missing files yield nil
+// without an error so callers can decide whether to surface the issue.
+func readCertFiles(cert, key string) (certBuf, keyBuf []byte) {
+	if cert != "" {
+		if c, err := os.ReadFile(cert); err == nil {
+			certBuf = c
+		}
+	}
+	if key != "" {
+		if k, err := os.ReadFile(key); err == nil {
+			keyBuf = k
+		}
+	}
+	return certBuf, keyBuf
+}
+
+// trimPaddingScheme returns the v2board padding scheme as a single newline
+// joined byte slice, ready for sing-anytls/padding.UpdatePaddingScheme.
+func trimPaddingScheme(scheme []string) []byte {
+	if len(scheme) == 0 {
+		return nil
+	}
+	return []byte(strings.Join(scheme, "\n"))
+}
+
+// formatListenAddr renders the v2board AnyTLS listen port as a TCP bind
+// string. Centralised so tests can override host injection if needed.
+func formatListenAddr(port int) string {
+	return fmt.Sprintf(":%d", port)
 }
