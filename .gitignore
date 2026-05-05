@@ -25,3 +25,6 @@ server.key
 # Local-only docs (analyses, planning notes)
 /ANALYSIS*.md
 /docs/
+
+# Local Claude workspace
+/.claude/
