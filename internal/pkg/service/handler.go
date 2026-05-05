@@ -8,8 +8,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/juju/ratelimit"
@@ -61,31 +63,42 @@ func (h *handler) NewConnectionEx(ctx context.Context, conn net.Conn,
 	h.b.online.Mark(uid, srcIP)
 	defer h.b.online.Unmark(uid, srcIP)
 
-	if !h.b.config.AllowPrivateOutbound && router.IsPrivateHost(host) {
-		log.Debugf("anytls handler: refusing private/loopback destination %s", host)
-		closeWithCause(conn, onClose, errPrivateDestination)
-		return
-	}
 	if !destination.IsValid() {
 		closeWithCause(conn, onClose, errInvalidDestination)
 		return
 	}
 
+	// Resolve once and pin the validated IP for the actual dial. Without
+	// pinning, an attacker could rebind DNS between the guard check and
+	// the connect() call and reach a private host (TOCTOU). When the
+	// operator opts into private targets we skip the guard entirely and
+	// fall back to the original destination string.
+	dialAddr := destination.String()
+	if !h.b.config.AllowPrivateOutbound {
+		ip, err := router.ResolveSafe(ctx, host)
+		if err != nil {
+			log.Debugf("anytls handler: refusing destination %s: %v", host, err)
+			closeWithCause(conn, onClose, errPrivateDestination)
+			return
+		}
+		dialAddr = net.JoinHostPort(ip.String(), strconv.Itoa(port))
+	}
+
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
-	upstream, err := dialContext(dialCtx, "tcp", destination.String())
+	upstream, err := dialContext(dialCtx, "tcp", dialAddr)
 	cancel()
 	if err != nil {
-		log.Debugf("anytls handler: dial %s failed: %v", destination, err)
+		log.Debugf("anytls handler: dial %s failed: %v", dialAddr, err)
 		closeWithCause(conn, onClose, err)
 		return
 	}
 	defer upstream.Close()
 
 	bucket := limiter.Bucket(uid)
-	tx, rx := relay(ctx, conn, upstream, bucket)
+	tx, rx, relayErr := relay(ctx, conn, upstream, bucket)
 	h.b.trafficStats.LogTraffic(uid, tx, rx)
 
-	closeWithCause(conn, onClose, nil)
+	closeWithCause(conn, onClose, relayErr)
 }
 
 // uidFromContext extracts the v2board uid that sing-anytls authenticated
@@ -133,40 +146,59 @@ func (b *Builder) routerSnapshot() *router.Router {
 }
 
 // relay copies bytes between the client stream and the upstream conn in
-// both directions, returning total byte counts (tx = client → upstream,
-// rx = upstream → client). bucket throttles both directions when non-nil.
-func relay(ctx context.Context, client, upstream net.Conn, bucket *ratelimit.Bucket) (tx, rx uint64) {
-	type result struct{ n int64 }
+// both directions, returning byte counts (tx = client → upstream, rx =
+// upstream → client) and the first non-EOF error observed on either leg
+// so callers can forward the cause to onClose. bucket throttles both
+// directions when non-nil.
+func relay(ctx context.Context, client, upstream net.Conn, bucket *ratelimit.Bucket) (tx, rx uint64, firstErr error) {
+	type direction int
+	const (
+		dirTx direction = iota // client → upstream
+		dirRx                  // upstream → client
+	)
+	type result struct {
+		dir direction
+		n   int64
+		err error
+	}
 	done := make(chan result, 2)
 
 	go func() {
-		n, _ := io.Copy(rateWriter{Writer: upstream, b: bucket}, client)
+		n, err := io.Copy(rateWriter{Writer: upstream, b: bucket}, client)
 		if cw, ok := upstream.(closeWriter); ok {
 			_ = cw.CloseWrite()
 		}
-		done <- result{n}
+		done <- result{dir: dirTx, n: n, err: err}
 	}()
 	go func() {
-		n, _ := io.Copy(rateWriter{Writer: client, b: bucket}, upstream)
+		n, err := io.Copy(rateWriter{Writer: client, b: bucket}, upstream)
 		if cw, ok := client.(closeWriter); ok {
 			_ = cw.CloseWrite()
 		}
-		done <- result{n}
+		done <- result{dir: dirRx, n: n, err: err}
 	}()
 
 	for i := 0; i < 2; i++ {
 		select {
 		case r := <-done:
-			if i == 0 {
+			switch r.dir {
+			case dirTx:
 				tx = uint64(r.n)
-			} else {
+			case dirRx:
 				rx = uint64(r.n)
 			}
+			if firstErr == nil && r.err != nil &&
+				!errors.Is(r.err, io.EOF) && !errors.Is(r.err, io.ErrClosedPipe) {
+				firstErr = r.err
+			}
 		case <-ctx.Done():
-			return tx, rx
+			if firstErr == nil {
+				firstErr = ctx.Err()
+			}
+			return tx, rx, firstErr
 		}
 	}
-	return tx, rx
+	return tx, rx, firstErr
 }
 
 // rateWriter wraps an io.Writer so each Write blocks on a token bucket.

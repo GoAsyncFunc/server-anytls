@@ -212,12 +212,15 @@ func (b *Builder) fetchUsersMonitor() error {
 }
 
 func (b *Builder) reportTrafficsMonitor() error {
-	stats := b.trafficStats.GetAndReset()
-	if len(stats) == 0 {
+	// Snapshot first; only subtract once the panel has accepted the
+	// payload. If the request fails or returns an error we keep the
+	// counter intact so the next tick retries with cumulative bytes.
+	snap := b.trafficStats.Snapshot()
+	if len(snap) == 0 {
 		return nil
 	}
-	report := make([]api.UserTraffic, 0, len(stats))
-	for uid, s := range stats {
+	report := make([]api.UserTraffic, 0, len(snap))
+	for uid, s := range snap {
 		if uid <= 0 || (s.Tx == 0 && s.Rx == 0) {
 			continue
 		}
@@ -227,12 +230,18 @@ func (b *Builder) reportTrafficsMonitor() error {
 			Download: int64(s.Rx),
 		})
 	}
-	if len(report) > 0 {
-		log.Infof("%d user traffic needs to be reported", len(report))
-		if err := b.apiClient.ReportUserTraffic(b.ctx, report); err != nil {
-			log.Errorln("server error when submitting traffic", err)
-		}
+	if len(report) == 0 {
+		// Filtered everything (e.g. all uid<=0); drain the snapshot so
+		// stale zero entries don't accumulate forever.
+		b.trafficStats.SubtractSnapshot(snap)
+		return nil
 	}
+	log.Infof("%d user traffic needs to be reported", len(report))
+	if err := b.apiClient.ReportUserTraffic(b.ctx, report); err != nil {
+		log.Errorln("server error when submitting traffic", err)
+		return nil // counters retained for next attempt
+	}
+	b.trafficStats.SubtractSnapshot(snap)
 	return nil
 }
 
@@ -258,12 +267,30 @@ func (b *Builder) checkNodeConfigMonitor() error {
 	}
 
 	log.Infoln("Node configuration changed, reloading inbound...")
+	if err := b.applyNodeInfoSafely(newNodeInfo, b.startInbound); err != nil {
+		// nodeInfo has been rolled back inside applyNodeInfoSafely so the
+		// next tick still observes a delta and retries.
+		log.Errorf("Failed to restart inbound: %v", err)
+	}
+	return nil
+}
+
+// applyNodeInfoSafely swaps in next, runs start, and reverts to the
+// previous nodeInfo on failure. The pre/post check pattern is what keeps
+// nodeChanged() honest: a half-applied reload that left b.nodeInfo
+// pointing at next would silence further retries because the next panel
+// poll would report no delta.
+func (b *Builder) applyNodeInfoSafely(next *api.NodeInfo, start func() error) error {
 	b.mu.Lock()
-	b.nodeInfo = newNodeInfo
+	prev := b.nodeInfo
+	b.nodeInfo = next
 	b.mu.Unlock()
 
-	if err := b.startInbound(); err != nil {
-		log.Errorf("Failed to restart inbound: %v", err)
+	if err := start(); err != nil {
+		b.mu.Lock()
+		b.nodeInfo = prev
+		b.mu.Unlock()
+		return err
 	}
 	return nil
 }

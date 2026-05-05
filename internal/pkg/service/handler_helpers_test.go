@@ -120,7 +120,7 @@ func TestRelayHandlesContextCancel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_, _ = relay(ctx, c1, c2, nil)
+		_, _, _ = relay(ctx, c1, c2, nil)
 		close(done)
 	}()
 	select {

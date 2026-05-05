@@ -7,7 +7,32 @@
 // guard rail).
 package router
 
-import "net"
+import (
+	"context"
+	"fmt"
+	"net"
+	"time"
+)
+
+// resolveTimeout caps the per-call DNS budget when ResolveSafe takes the
+// FQDN branch. Long enough to absorb a round-trip to a slow recursive
+// resolver, short enough that handlers don't pile up.
+const resolveTimeout = 5 * time.Second
+
+// resolveLookup is package-mutable so tests can substitute a deterministic
+// resolver. It returns the list of addresses bound to host, in resolver
+// order.
+var resolveLookup = func(ctx context.Context, host string) ([]net.IP, error) {
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]net.IP, 0, len(addrs))
+	for _, a := range addrs {
+		out = append(out, a.IP)
+	}
+	return out, nil
+}
 
 // privateV4 lists the CIDR blocks that the default deny path treats as
 // private or otherwise reserved when --allow-private-outbound is false.
@@ -81,6 +106,47 @@ func IsPrivateHost(host string) bool {
 		}
 	}
 	return false
+}
+
+// ResolveSafe resolves host once and returns a single concrete IP that has
+// passed the private-network filter. Callers must dial this exact IP, not
+// the original hostname, to defeat DNS rebinding (TOCTOU between the
+// guard check and the eventual connect).
+//
+// IP literals are validated in place. FQDN inputs are resolved with the
+// supplied context bounded by resolveTimeout; if any resolved address is
+// private the call fails (fail-closed against split-horizon rebind).
+//
+// Returns an error mentioning host on every refusal so logs stay
+// diagnosable.
+func ResolveSafe(ctx context.Context, host string) (net.IP, error) {
+	if host == "" {
+		return nil, fmt.Errorf("ResolveSafe: empty host")
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		if IsPrivate(ip) {
+			return nil, fmt.Errorf("ResolveSafe: %s is in a private/reserved range", host)
+		}
+		return ip, nil
+	}
+
+	rctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	defer cancel()
+
+	addrs, err := resolveLookup(rctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("ResolveSafe: lookup %s: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("ResolveSafe: %s resolved to no addresses", host)
+	}
+	for _, a := range addrs {
+		if IsPrivate(a) {
+			return nil, fmt.Errorf("ResolveSafe: %s resolves to private address %s", host, a)
+		}
+	}
+	return addrs[0], nil
 }
 
 func mustCIDR(s string) *net.IPNet {

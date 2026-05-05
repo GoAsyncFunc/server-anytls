@@ -6,10 +6,12 @@
 package service
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
+	"time"
 
 	api "github.com/GoAsyncFunc/uniproxy/pkg"
 	anytls "github.com/anytls/sing-anytls"
@@ -19,6 +21,34 @@ import (
 
 	"github.com/GoAsyncFunc/server-anytls/internal/pkg/router"
 )
+
+// tlsHandshakeTimeout caps how long an accepted socket may take to
+// complete the TLS handshake before we drop it. Without this bound,
+// silent slow-loris clients can hold goroutines indefinitely because
+// HandshakeContext only respects the parent (long-lived) ctx.
+const tlsHandshakeTimeout = 10 * time.Second
+
+// anytlsHandshakeTimeout extends the deadline window to cover the AnyTLS
+// framing handshake that runs after TLS completes. sing-anytls sets its
+// own per-frame timing once the session is up; this only bounds the
+// silent gap between TLS finished and the first AnyTLS frame.
+const anytlsHandshakeTimeout = 30 * time.Second
+
+// maxConcurrentHandshakes caps the number of accepted sockets that may
+// be inside the TLS+AnyTLS handshake at the same time. Beyond this we
+// drop newly accepted connections before allocating a goroutine, so a
+// flood of half-open clients cannot exhaust process resources.
+const maxConcurrentHandshakes = 1024
+
+// contextForHandshake returns a child context bounded by deadline. parent
+// may be nil (typical only in unit tests that exercise serveConn without
+// a fully constructed Builder); in that case Background() is used.
+func contextForHandshake(parent context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithDeadline(parent, deadline)
+}
 
 // startInbound builds (or rebuilds) the TLS listener, sing-anytls service,
 // and route table from the current b.nodeInfo / b.config.
@@ -97,31 +127,74 @@ func (b *Builder) startInbound() error {
 // acceptLoop runs the TCP→TLS→sing-anytls handshake chain for a single
 // listener instance. It exits when ln.Accept fails (typically because
 // startInbound replaced the listener or Close was called).
+//
+// A bounded semaphore caps concurrent handshakes so a slow-loris flood
+// cannot inflate goroutine count without bound. When the cap is hit we
+// close the freshly accepted socket immediately rather than block accept.
 func (b *Builder) acceptLoop(ln net.Listener, tlsCfg *tls.Config, svc *anytls.Service) {
+	sem := make(chan struct{}, maxConcurrentHandshakes)
 	for {
 		raw, err := ln.Accept()
 		if err != nil {
-			if b.ctx.Err() != nil {
+			if b.ctx != nil && b.ctx.Err() != nil {
 				return
 			}
-			log.Debugf("acceptLoop exiting: %v", err)
+			log.Warnf("acceptLoop on %s exiting: %v", ln.Addr(), err)
 			return
 		}
-		go b.serveConn(raw, tlsCfg, svc)
+		select {
+		case sem <- struct{}{}:
+		default:
+			log.Warnf("acceptLoop: handshake semaphore full (%d), dropping %s",
+				maxConcurrentHandshakes, raw.RemoteAddr())
+			_ = raw.Close()
+			continue
+		}
+		go func(c net.Conn) {
+			defer func() { <-sem }()
+			b.serveConn(c, tlsCfg, svc)
+		}(raw)
 	}
 }
 
 // serveConn runs the TLS handshake then hands the plaintext stream to
-// the sing-anytls service.
+// the sing-anytls service. The handshake is bounded by tlsHandshakeTimeout
+// independently of any service-wide context so silent peers cannot stall.
 func (b *Builder) serveConn(raw net.Conn, tlsCfg *tls.Config, svc *anytls.Service) {
-	tlsConn := tls.Server(raw, tlsCfg)
-	if err := tlsConn.HandshakeContext(b.ctx); err != nil {
+	deadline := time.Now().Add(tlsHandshakeTimeout)
+	if err := raw.SetDeadline(deadline); err != nil {
 		_ = raw.Close()
-		log.Debugf("TLS handshake from %s failed: %v", raw.RemoteAddr(), err)
+		log.Warnf("serveConn: SetDeadline on %s failed: %v", raw.RemoteAddr(), err)
 		return
 	}
+
+	tlsConn := tls.Server(raw, tlsCfg)
+	handshakeCtx, cancel := contextForHandshake(b.ctx, deadline)
+	defer cancel()
+	if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
+		_ = raw.Close()
+		log.Warnf("TLS handshake from %s failed: %v", raw.RemoteAddr(), err)
+		return
+	}
+
+	// Extend deadline to bound the AnyTLS framing handshake. sing-anytls
+	// sets its own per-frame timing on the underlying conn after the
+	// session is established; the deadline therefore only fires if the
+	// peer never sends a single AnyTLS frame.
+	if err := raw.SetDeadline(time.Now().Add(anytlsHandshakeTimeout)); err != nil {
+		_ = tlsConn.Close()
+		log.Warnf("serveConn: extend deadline on %s failed: %v", raw.RemoteAddr(), err)
+		return
+	}
+
+	if svc == nil {
+		// Tests exercise the deadline path without a sing-anytls service.
+		_ = tlsConn.Close()
+		return
+	}
+
 	src := M.SocksaddrFromNet(raw.RemoteAddr())
 	if err := svc.NewConnection(b.ctx, tlsConn, src, nil); err != nil && err != io.EOF {
-		log.Debugf("anytls service.NewConnection from %s: %v", raw.RemoteAddr(), err)
+		log.Warnf("anytls service.NewConnection from %s: %v", raw.RemoteAddr(), err)
 	}
 }
