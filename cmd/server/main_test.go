@@ -1,8 +1,10 @@
 package main
 
 import (
+	"flag"
 	"testing"
 
+	log "github.com/sirupsen/logrus"
 	cli "github.com/urfave/cli/v2"
 
 	"github.com/GoAsyncFunc/server-anytls/internal/app/server"
@@ -150,5 +152,39 @@ func TestBuildApp_AppMetadata(t *testing.T) {
 	}
 	if !hasVersion {
 		t.Error("missing 'version' subcommand")
+	}
+}
+
+func TestBuildApp_BeforeConfiguresSupportedLogModes(t *testing.T) {
+	cases := []struct {
+		name      string
+		mode      string
+		wantLevel log.Level
+	}{
+		{"debug", server.LogLevelDebug, log.DebugLevel},
+		{"info", server.LogLevelInfo, log.InfoLevel},
+		{"error", server.LogLevelError, log.ErrorLevel},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &server.Config{LogLevel: tc.mode}
+			app := BuildApp(cfg, &api.Config{}, &service.Config{}, &service.CertConfig{})
+			ctx := cli.NewContext(app, flag.NewFlagSet("test", flag.ContinueOnError), nil)
+			if err := app.Before(ctx); err != nil {
+				t.Fatalf("Before(%q): %v", tc.mode, err)
+			}
+			if got := log.GetLevel(); got != tc.wantLevel {
+				t.Errorf("log level=%v want %v", got, tc.wantLevel)
+			}
+		})
+	}
+}
+
+func TestBuildApp_BeforeRejectsUnsupportedLogMode(t *testing.T) {
+	cfg := &server.Config{LogLevel: "trace"}
+	app := BuildApp(cfg, &api.Config{}, &service.Config{}, &service.CertConfig{})
+	ctx := cli.NewContext(app, flag.NewFlagSet("test", flag.ContinueOnError), nil)
+	if err := app.Before(ctx); err == nil {
+		t.Fatal("Before should reject unsupported log mode")
 	}
 }

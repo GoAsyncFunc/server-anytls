@@ -36,6 +36,9 @@ func (s *TrafficStats) LogTraffic(uid int, tx, rx uint64) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stats == nil {
+		s.stats = make(map[int]*ConnStats)
+	}
 	c, ok := s.stats[uid]
 	if !ok {
 		c = &ConnStats{}

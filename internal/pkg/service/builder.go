@@ -151,7 +151,9 @@ func (b *Builder) Start() error {
 // Close stops every periodic, closes the listener, and cancels the
 // context. Idempotent.
 func (b *Builder) Close() error {
-	b.cancel()
+	if b.cancel != nil {
+		b.cancel()
+	}
 	for _, p := range []*Periodic{
 		b.fetchUsersMonitorPeriodic,
 		b.reportTrafficsMonitorPeriodic,

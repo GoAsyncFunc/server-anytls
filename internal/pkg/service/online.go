@@ -26,6 +26,9 @@ func (t *OnlineTracker) Mark(uid int, ip string) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.table == nil {
+		t.table = make(map[int]map[string]int)
+	}
 	ips, ok := t.table[uid]
 	if !ok {
 		ips = make(map[string]int)
