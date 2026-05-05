@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,7 +27,7 @@ var Version = "dev"
 
 func main() {
 	cli.VersionPrinter = func(c *cli.Context) {
-		fmt.Printf("%s version %s\n", c.App.Name, c.App.Version)
+		fmt.Println(versionLine(c.App.Name, c.App.Version))
 	}
 
 	var config server.Config
@@ -60,14 +61,12 @@ func BuildApp(
 				Name:        "api",
 				Usage:       "Server address",
 				EnvVars:     []string{"API"},
-				Required:    true,
 				Destination: &apiConfig.APIHost,
 			},
 			&cli.StringFlag{
 				Name:        "token",
 				Usage:       "Token of server API",
 				EnvVars:     []string{"TOKEN"},
-				Required:    true,
 				Destination: &apiConfig.Key,
 			},
 			&cli.StringFlag{
@@ -90,7 +89,6 @@ func BuildApp(
 				Name:        "node",
 				Usage:       "Node ID",
 				EnvVars:     []string{"NODE"},
-				Required:    true,
 				Destination: &apiConfig.NodeID,
 			},
 			&cli.DurationFlag{
@@ -127,6 +125,12 @@ func BuildApp(
 				EnvVars:     []string{"LOG_LEVEL"},
 				Destination: &config.LogLevel,
 			},
+			&cli.BoolFlag{
+				Name:        "allow_private_outbound",
+				Usage:       "Allow outbound connections to private/reserved IP ranges",
+				EnvVars:     []string{"ALLOW_PRIVATE_OUTBOUND"},
+				Destination: &serviceConfig.AllowPrivateOutbound,
+			},
 		},
 		Before: func(c *cli.Context) error {
 			log.SetFormatter(&log.TextFormatter{})
@@ -147,6 +151,9 @@ func BuildApp(
 		Action: func(c *cli.Context) error {
 			serviceConfig.Cert = certConfig
 
+			if err := validateRequiredConfig(apiConfig); err != nil {
+				return err
+			}
 			apiConfig.NodeType = api.AnyTls
 
 			serv, err := server.New(config, apiConfig, serviceConfig)
@@ -184,11 +191,28 @@ func BuildApp(
 			Aliases: []string{"v"},
 			Usage:   "Show version information",
 			Action: func(c *cli.Context) error {
-				fmt.Printf("version=%s\n", Version)
+				fmt.Println(versionLine(Name, Version))
 				return nil
 			},
 		},
 	}
 
 	return app
+}
+
+func versionLine(appName, appVersion string) string {
+	return fmt.Sprintf("%s version %s", appName, appVersion)
+}
+
+func validateRequiredConfig(apiConfig *api.Config) error {
+	if strings.TrimSpace(apiConfig.APIHost) == "" {
+		return fmt.Errorf("api is required")
+	}
+	if strings.TrimSpace(apiConfig.Key) == "" {
+		return fmt.Errorf("token is required")
+	}
+	if apiConfig.NodeID <= 0 {
+		return fmt.Errorf("node is required")
+	}
+	return nil
 }

@@ -88,9 +88,31 @@ func New(ctx context.Context, config *Config, nodeInfo *api.NodeInfo, apiClient 
 	}
 }
 
+func (b *Builder) validateIntervals() error {
+	if b.config == nil {
+		return fmt.Errorf("service config is required")
+	}
+	if b.config.FetchUsersInterval <= 0 {
+		return fmt.Errorf("fetch_users_interval must be positive")
+	}
+	if b.config.ReportTrafficsInterval <= 0 {
+		return fmt.Errorf("report_traffics_interval must be positive")
+	}
+	if b.config.HeartbeatInterval < 0 {
+		return fmt.Errorf("heartbeat_interval must not be negative")
+	}
+	if b.config.CheckNodeInterval < 0 {
+		return fmt.Errorf("check_node_interval must not be negative")
+	}
+	return nil
+}
+
 // Start opens the inbound listener, fetches the initial user list, and
 // schedules the four periodic control-plane tasks.
 func (b *Builder) Start() error {
+	if err := b.validateIntervals(); err != nil {
+		return err
+	}
 	if err := b.startInbound(); err != nil {
 		return err
 	}
@@ -167,7 +189,10 @@ func (b *Builder) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.listener != nil {
-		_ = b.listener.Close()
+		if err := b.listener.Close(); err != nil {
+			b.listener = nil
+			return err
+		}
 		b.listener = nil
 	}
 	return nil

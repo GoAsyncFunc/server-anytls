@@ -92,7 +92,11 @@ func (h *handler) NewConnectionEx(ctx context.Context, conn net.Conn,
 		closeWithCause(conn, onClose, err)
 		return
 	}
-	defer upstream.Close()
+	defer func() {
+		if err := upstream.Close(); err != nil {
+			log.Debugf("anytls handler: close upstream failed: %v", err)
+		}
+	}()
 
 	bucket := limiter.Bucket(uid)
 	tx, rx, relayErr := relay(ctx, conn, upstream, bucket)
@@ -166,14 +170,18 @@ func relay(ctx context.Context, client, upstream net.Conn, bucket *ratelimit.Buc
 	go func() {
 		n, err := io.Copy(rateWriter{Writer: upstream, b: bucket}, client)
 		if cw, ok := upstream.(closeWriter); ok {
-			_ = cw.CloseWrite()
+			if closeErr := cw.CloseWrite(); err == nil && closeErr != nil {
+				err = closeErr
+			}
 		}
 		done <- result{dir: dirTx, n: n, err: err}
 	}()
 	go func() {
 		n, err := io.Copy(rateWriter{Writer: client, b: bucket}, upstream)
 		if cw, ok := client.(closeWriter); ok {
-			_ = cw.CloseWrite()
+			if closeErr := cw.CloseWrite(); err == nil && closeErr != nil {
+				err = closeErr
+			}
 		}
 		done <- result{dir: dirRx, n: n, err: err}
 	}()
@@ -224,7 +232,9 @@ type closeWriter interface {
 // closeWithCause closes the conn and forwards the cause to sing-anytls
 // via onClose (if supplied).
 func closeWithCause(conn net.Conn, onClose N.CloseHandlerFunc, cause error) {
-	_ = conn.Close()
+	if err := conn.Close(); err != nil {
+		log.Debugf("anytls handler: close connection failed: %v", err)
+	}
 	if onClose != nil {
 		onClose(cause)
 	}

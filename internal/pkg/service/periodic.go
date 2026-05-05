@@ -5,6 +5,7 @@
 package service
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -32,8 +33,11 @@ func (p *Periodic) Start() error {
 	if p.started {
 		return nil
 	}
-	if p.Interval <= 0 || p.Execute == nil {
-		return nil
+	if p.Interval <= 0 {
+		return fmt.Errorf("periodic interval must be positive")
+	}
+	if p.Execute == nil {
+		return fmt.Errorf("periodic execute function is required")
 	}
 	p.stop = make(chan struct{})
 	p.started = true

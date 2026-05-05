@@ -8,11 +8,14 @@ import (
 )
 
 func TestPeriodic_StartFiresExecute(t *testing.T) {
-	var calls atomic.Int64
+	calls := make(chan struct{}, 2)
 	p := &Periodic{
-		Interval: 5 * time.Millisecond,
+		Interval: time.Millisecond,
 		Execute: func() error {
-			calls.Add(1)
+			select {
+			case calls <- struct{}{}:
+			default:
+			}
 			return nil
 		},
 	}
@@ -21,9 +24,12 @@ func TestPeriodic_StartFiresExecute(t *testing.T) {
 	}
 	defer p.Close()
 
-	time.Sleep(30 * time.Millisecond)
-	if calls.Load() < 2 {
-		t.Errorf("Execute called %d times, want >=2", calls.Load())
+	for i := 0; i < 2; i++ {
+		select {
+		case <-calls:
+		case <-time.After(time.Second):
+			t.Fatalf("Execute called %d times, want 2", i)
+		}
 	}
 }
 
@@ -90,14 +96,14 @@ func TestPeriodic_ExecuteErrorDoesNotStopLoop(t *testing.T) {
 
 func TestPeriodic_RejectsZeroIntervalAndNilExecute(t *testing.T) {
 	p1 := &Periodic{Interval: 0, Execute: func() error { return nil }}
-	if err := p1.Start(); err != nil {
-		t.Fatalf("Start zero-interval: %v", err)
+	if err := p1.Start(); err == nil {
+		t.Fatal("Start zero-interval should fail")
 	}
 	p1.Close()
 
 	p2 := &Periodic{Interval: time.Millisecond, Execute: nil}
-	if err := p2.Start(); err != nil {
-		t.Fatalf("Start nil-Execute: %v", err)
+	if err := p2.Start(); err == nil {
+		t.Fatal("Start nil-Execute should fail")
 	}
 	p2.Close()
 }

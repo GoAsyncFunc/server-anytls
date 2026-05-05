@@ -19,7 +19,7 @@ import (
 
 func TestServeConn_HandshakeDeadlineClosesSilentClient(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
-	defer clientSide.Close()
+	defer closeTestConn(t, clientSide)
 
 	// Empty TLS config; server will block waiting for ClientHello.
 	tlsCfg := &tls.Config{}

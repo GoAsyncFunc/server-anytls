@@ -12,6 +12,13 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
+func closeTestConn(t *testing.T, conn net.Conn) {
+	t.Helper()
+	if err := conn.Close(); err != nil {
+		t.Logf("close test conn: %v", err)
+	}
+}
+
 func TestUidFromContext(t *testing.T) {
 	cases := []struct {
 		name string
@@ -92,7 +99,7 @@ func (w *writeCollector) Write(p []byte) (int, error) {
 
 func TestCloseWithCause(t *testing.T) {
 	c1, c2 := net.Pipe()
-	defer c2.Close()
+	defer closeTestConn(t, c2)
 
 	called := 0
 	closeWithCause(c1, func(error) { called++ }, errors.New("boom"))
@@ -106,14 +113,14 @@ func TestCloseWithCause(t *testing.T) {
 	}
 
 	c3, c4 := net.Pipe()
-	defer c4.Close()
+	defer closeTestConn(t, c4)
 	closeWithCause(c3, nil, nil) // nil onClose must be safe
 }
 
 func TestRelayHandlesContextCancel(t *testing.T) {
 	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	defer closeTestConn(t, c1)
+	defer closeTestConn(t, c2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled before relay starts

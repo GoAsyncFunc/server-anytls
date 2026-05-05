@@ -106,8 +106,8 @@ func TestRelay_DirectionalAccounting(t *testing.T) {
 
 func TestRelay_PropagatesNonEOFError(t *testing.T) {
 	clientA, clientB := net.Pipe()
-	defer clientA.Close()
-	defer clientB.Close()
+	defer closeTestConn(t, clientA)
+	defer closeTestConn(t, clientB)
 
 	upstream := &errReadConn{err: errors.New("upstream read kaboom")}
 

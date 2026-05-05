@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"flag"
+	"io"
+	"os"
 	"testing"
 
 	log "github.com/sirupsen/logrus"
@@ -20,6 +23,18 @@ func newTestApp() *cli.App {
 		&service.Config{},
 		&service.CertConfig{},
 	)
+}
+
+func preserveLogState(t *testing.T) {
+	t.Helper()
+	formatter := log.StandardLogger().Formatter
+	level := log.GetLevel()
+	reportCaller := log.StandardLogger().ReportCaller
+	t.Cleanup(func() {
+		log.SetFormatter(formatter)
+		log.SetLevel(level)
+		log.SetReportCaller(reportCaller)
+	})
 }
 
 func TestBuildApp_NoFlagCollisions(t *testing.T) {
@@ -65,28 +80,15 @@ func TestBuildApp_AliasesWired(t *testing.T) {
 	}
 }
 
-func TestBuildApp_RequiredFlags(t *testing.T) {
+func TestBuildApp_NoAppLevelRequiredFlags(t *testing.T) {
 	app := newTestApp()
-	wantRequired := map[string]bool{
-		"api":   true,
-		"token": true,
-		"node":  true,
-	}
 	for _, f := range app.Flags {
-		name := f.Names()[0]
 		req, ok := f.(cli.RequiredFlag)
 		if !ok {
 			continue
 		}
-		got := req.IsRequired()
-		want, has := wantRequired[name]
-		switch {
-		case has && !got:
-			t.Errorf("flag %q expected Required=true, got false", name)
-		case !has && got:
-			t.Errorf("flag %q unexpectedly Required=true", name)
-		case has && want != got:
-			t.Errorf("flag %q Required mismatch: want %v got %v", name, want, got)
+		if req.IsRequired() {
+			t.Errorf("flag %q should validate in Action, not via app-level Required", f.Names()[0])
 		}
 	}
 }
@@ -109,17 +111,59 @@ func TestBuildApp_LogModeDefault(t *testing.T) {
 	t.Fatal("log_mode flag not found")
 }
 
-func TestBuildApp_PrimaryFlagCount(t *testing.T) {
+func TestBuildApp_ExpectedPrimaryFlagsExist(t *testing.T) {
 	app := newTestApp()
-	got := len(app.Flags)
-	const want = 9
-	if got != want {
-		names := make([]string, 0, got)
-		for _, f := range app.Flags {
-			names = append(names, f.Names()[0])
-		}
-		t.Errorf("flag count = %d, want %d (have: %v)", got, want, names)
+	want := map[string]bool{
+		"api":                      true,
+		"token":                    true,
+		"cert_file":                true,
+		"key_file":                 true,
+		"node":                     true,
+		"fetch_users_interval":     true,
+		"report_traffics_interval": true,
+		"heartbeat_interval":       true,
+		"log_mode":                 true,
+		"allow_private_outbound":   true,
 	}
+	got := make(map[string]bool, len(app.Flags))
+	for _, f := range app.Flags {
+		got[f.Names()[0]] = true
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("missing primary flag %q", name)
+		}
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	writerClosed := false
+	defer func() {
+		os.Stdout = old
+		if !writerClosed {
+			_ = w.Close()
+		}
+		_ = r.Close()
+	}()
+
+	os.Stdout = w
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stdout writer: %v", err)
+	}
+	writerClosed = true
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	return buf.String()
 }
 
 func TestBuildApp_VersionConstant(t *testing.T) {
@@ -129,6 +173,32 @@ func TestBuildApp_VersionConstant(t *testing.T) {
 	app := newTestApp()
 	if app.Version != Version {
 		t.Errorf("app.Version = %q, want %q", app.Version, Version)
+	}
+}
+
+func TestVersionCommandUsesCanonicalLine(t *testing.T) {
+	app := newTestApp()
+	ctx := cli.NewContext(app, flag.NewFlagSet("test", flag.ContinueOnError), nil)
+
+	var versionCmd *cli.Command
+	for _, cmd := range app.Commands {
+		if cmd.Name == "version" {
+			versionCmd = cmd
+			break
+		}
+	}
+	if versionCmd == nil {
+		t.Fatal("missing version command")
+	}
+	got := captureStdout(t, func() {
+		if err := versionCmd.Action(ctx); err != nil {
+			t.Fatalf("version command: %v", err)
+		}
+	})
+
+	want := versionLine(Name, Version) + "\n"
+	if got != want {
+		t.Fatalf("version output=%q want %q", got, want)
 	}
 }
 
@@ -167,6 +237,7 @@ func TestBuildApp_BeforeConfiguresSupportedLogModes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			preserveLogState(t)
 			cfg := &server.Config{LogLevel: tc.mode}
 			app := BuildApp(cfg, &api.Config{}, &service.Config{}, &service.CertConfig{})
 			ctx := cli.NewContext(app, flag.NewFlagSet("test", flag.ContinueOnError), nil)
@@ -181,10 +252,36 @@ func TestBuildApp_BeforeConfiguresSupportedLogModes(t *testing.T) {
 }
 
 func TestBuildApp_BeforeRejectsUnsupportedLogMode(t *testing.T) {
+	preserveLogState(t)
 	cfg := &server.Config{LogLevel: "trace"}
 	app := BuildApp(cfg, &api.Config{}, &service.Config{}, &service.CertConfig{})
 	ctx := cli.NewContext(app, flag.NewFlagSet("test", flag.ContinueOnError), nil)
 	if err := app.Before(ctx); err == nil {
 		t.Fatal("Before should reject unsupported log mode")
+	}
+}
+
+func TestValidateRequiredConfigRejectsMissingFields(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  api.Config
+	}{
+		{"missing api", api.Config{Key: "token", NodeID: 1}},
+		{"missing token", api.Config{APIHost: "https://panel.example", NodeID: 1}},
+		{"missing node", api.Config{APIHost: "https://panel.example", Key: "token"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateRequiredConfig(&tc.cfg); err == nil {
+				t.Fatal("validateRequiredConfig should reject incomplete config")
+			}
+		})
+	}
+}
+
+func TestValidateRequiredConfigAcceptsCompleteConfig(t *testing.T) {
+	cfg := &api.Config{APIHost: "https://panel.example", Key: "token", NodeID: 1}
+	if err := validateRequiredConfig(cfg); err != nil {
+		t.Fatalf("validateRequiredConfig: %v", err)
 	}
 }

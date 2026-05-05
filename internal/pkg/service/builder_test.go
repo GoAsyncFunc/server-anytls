@@ -3,10 +3,51 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	api "github.com/GoAsyncFunc/uniproxy/pkg"
 )
+
+func TestBuilderStartRejectsInvalidIntervalsBeforeSideEffects(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "fetch users interval",
+			cfg: Config{
+				FetchUsersInterval:     0,
+				ReportTrafficsInterval: time.Second,
+				CheckNodeInterval:      time.Second,
+			},
+			want: "fetch_users_interval",
+		},
+		{
+			name: "report traffics interval",
+			cfg: Config{
+				FetchUsersInterval:     time.Second,
+				ReportTrafficsInterval: 0,
+				CheckNodeInterval:      time.Second,
+			},
+			want: "report_traffics_interval",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &Builder{config: &tc.cfg}
+			err := b.Start()
+			if err == nil {
+				t.Fatal("Start should reject invalid interval")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Start error=%q want mention %q", err, tc.want)
+			}
+		})
+	}
+}
 
 func TestEqualStringSlice(t *testing.T) {
 	cases := []struct {
