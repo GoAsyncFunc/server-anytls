@@ -15,7 +15,6 @@ import (
 	api "github.com/GoAsyncFunc/uniproxy/pkg"
 )
 
-// newTestApp constructs a CLI app with fresh zero-valued destinations for tests.
 func newTestApp() *cli.App {
 	return BuildApp(
 		&server.Config{},

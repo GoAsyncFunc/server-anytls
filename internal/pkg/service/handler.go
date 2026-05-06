@@ -223,8 +223,6 @@ func (w rateWriter) Write(p []byte) (int, error) {
 	return w.Writer.Write(p)
 }
 
-// closeWriter is satisfied by *net.TCPConn and similar half-close-capable
-// connections.
 type closeWriter interface {
 	CloseWrite() error
 }

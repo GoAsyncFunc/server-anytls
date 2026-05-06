@@ -94,8 +94,6 @@ func TestRelay_DirectionalAccounting(t *testing.T) {
 	if rx != uint64(len(upstreamPayload)) {
 		t.Errorf("rx = %d, want %d (upstream→client)", rx, len(upstreamPayload))
 	}
-	// Bytes that travelled tx must end up on upstream's write buffer; rx
-	// bytes must end up on client's write buffer.
 	if got := upstream.Written(); !bytes.Equal(got, clientPayload) {
 		t.Errorf("upstream received %q, want %q", got, clientPayload)
 	}
@@ -104,10 +102,6 @@ func TestRelay_DirectionalAccounting(t *testing.T) {
 	}
 }
 
-// halfCloseFailConn is a net.Conn that delivers a deterministic payload
-// once and then fails CloseWrite with a sentinel error. It lets the test
-// assert that a flaky half-close on the upstream leg never bubbles up to
-// the relay caller as a transport failure.
 type halfCloseFailConn struct {
 	*bufConn
 	closeWriteErr error
