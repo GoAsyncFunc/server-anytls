@@ -54,9 +54,11 @@ func TestBuildApp_NoFlagCollisions(t *testing.T) {
 func TestBuildApp_AliasesWired(t *testing.T) {
 	app := newTestApp()
 	want := map[string]string{
-		"fui": "fetch_users_interval",
-		"rti": "report_traffics_interval",
-		"hbi": "heartbeat_interval",
+		"fui":                    "fetch_users_interval",
+		"rti":                    "report_traffics_interval",
+		"hbi":                    "heartbeat_interval",
+		"cni":                    "check_node_interval",
+		"allow_private_outbound": "allow-private-outbound",
 	}
 	flagsByName := map[string]cli.Flag{}
 	for _, f := range app.Flags {
@@ -122,8 +124,9 @@ func TestBuildApp_ExpectedPrimaryFlagsExist(t *testing.T) {
 		"fetch_users_interval":     true,
 		"report_traffics_interval": true,
 		"heartbeat_interval":       true,
+		"check_node_interval":      true,
 		"log_mode":                 true,
-		"allow_private_outbound":   true,
+		"allow-private-outbound":   true,
 	}
 	got := make(map[string]bool, len(app.Flags))
 	for _, f := range app.Flags {

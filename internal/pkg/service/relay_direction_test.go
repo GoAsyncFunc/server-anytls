@@ -104,6 +104,45 @@ func TestRelay_DirectionalAccounting(t *testing.T) {
 	}
 }
 
+// halfCloseFailConn is a net.Conn that delivers a deterministic payload
+// once and then fails CloseWrite with a sentinel error. It lets the test
+// assert that a flaky half-close on the upstream leg never bubbles up to
+// the relay caller as a transport failure.
+type halfCloseFailConn struct {
+	*bufConn
+	closeWriteErr error
+}
+
+func (c *halfCloseFailConn) CloseWrite() error { return c.closeWriteErr }
+
+func TestRelay_CloseWriteErrorIsNotPropagated(t *testing.T) {
+	clientPayload := []byte("client-data")
+	upstreamPayload := []byte("upstream-data")
+
+	client := &halfCloseFailConn{
+		bufConn:       newBufConn(clientPayload),
+		closeWriteErr: errors.New("client close-write boom"),
+	}
+	upstream := &halfCloseFailConn{
+		bufConn:       newBufConn(upstreamPayload),
+		closeWriteErr: errors.New("upstream close-write boom"),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	tx, rx, err := relay(ctx, client, upstream, nil)
+	if err != nil {
+		t.Fatalf("relay propagated CloseWrite error: %v", err)
+	}
+	if tx != uint64(len(clientPayload)) {
+		t.Errorf("tx = %d, want %d", tx, len(clientPayload))
+	}
+	if rx != uint64(len(upstreamPayload)) {
+		t.Errorf("rx = %d, want %d", rx, len(upstreamPayload))
+	}
+}
+
 func TestRelay_PropagatesNonEOFError(t *testing.T) {
 	clientA, clientB := net.Pipe()
 	defer closeTestConn(t, clientA)

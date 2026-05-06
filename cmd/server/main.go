@@ -118,6 +118,13 @@ func BuildApp(
 				DefaultText: "180",
 				Destination: &serviceConfig.HeartbeatInterval,
 			},
+			&cli.DurationFlag{
+				Name:        "check_node_interval",
+				Aliases:     []string{"cni"},
+				Usage:       "API request cycle(check node config), unit: second",
+				EnvVars:     []string{"CHECK_NODE_INTERVAL"},
+				Destination: &serviceConfig.CheckNodeInterval,
+			},
 			&cli.StringFlag{
 				Name:        "log_mode",
 				Value:       server.LogLevelError,
@@ -126,7 +133,8 @@ func BuildApp(
 				Destination: &config.LogLevel,
 			},
 			&cli.BoolFlag{
-				Name:        "allow_private_outbound",
+				Name:        "allow-private-outbound",
+				Aliases:     []string{"allow_private_outbound"},
 				Usage:       "Allow outbound connections to private/reserved IP ranges",
 				EnvVars:     []string{"ALLOW_PRIVATE_OUTBOUND"},
 				Destination: &serviceConfig.AllowPrivateOutbound,

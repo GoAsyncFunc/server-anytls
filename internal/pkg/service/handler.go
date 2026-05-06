@@ -170,8 +170,8 @@ func relay(ctx context.Context, client, upstream net.Conn, bucket *ratelimit.Buc
 	go func() {
 		n, err := io.Copy(rateWriter{Writer: upstream, b: bucket}, client)
 		if cw, ok := upstream.(closeWriter); ok {
-			if closeErr := cw.CloseWrite(); err == nil && closeErr != nil {
-				err = closeErr
+			if closeErr := cw.CloseWrite(); closeErr != nil {
+				log.Debugf("anytls relay: close upstream write failed: %v", closeErr)
 			}
 		}
 		done <- result{dir: dirTx, n: n, err: err}
@@ -179,8 +179,8 @@ func relay(ctx context.Context, client, upstream net.Conn, bucket *ratelimit.Buc
 	go func() {
 		n, err := io.Copy(rateWriter{Writer: client, b: bucket}, upstream)
 		if cw, ok := client.(closeWriter); ok {
-			if closeErr := cw.CloseWrite(); err == nil && closeErr != nil {
-				err = closeErr
+			if closeErr := cw.CloseWrite(); closeErr != nil {
+				log.Debugf("anytls relay: close client write failed: %v", closeErr)
 			}
 		}
 		done <- result{dir: dirRx, n: n, err: err}
