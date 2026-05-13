@@ -3,7 +3,7 @@ module github.com/GoAsyncFunc/server-anytls
 go 1.25.6
 
 require (
-	github.com/GoAsyncFunc/uniproxy v0.0.12
+	github.com/GoAsyncFunc/uniproxy v0.1.1
 	github.com/anytls/sing-anytls v0.0.11
 	github.com/juju/ratelimit v1.0.2
 	github.com/sirupsen/logrus v1.9.4
@@ -22,6 +22,6 @@ require (
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/sagernet/sing v0.8.9
 	github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 // indirect
-	golang.org/x/net v0.48.0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
+	golang.org/x/net v0.53.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
 )
